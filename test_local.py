@@ -19,14 +19,14 @@ def main(path: str):
     with open(path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode()
 
-    audio, sr = decode_audio_b64(b64)
-    print(f"Audio cargado: {len(audio)} samples @ {sr}Hz")
+    caller_audio, agent_audio, sr = decode_audio_b64(b64)
+    print(f"Audio cargado: {len(caller_audio)} samples @ {sr}Hz")
 
-    fast_result = evaluate_fast(audio, sr)
+    fast_result = evaluate_fast(caller_audio, sr)
     print("Fase 1 (rápida):", fast_result)
 
     heavy_model.load_model()
-    heavy_result = heavy_model.evaluate_heavy(audio, sr)
+    heavy_result = heavy_model.evaluate_heavy(caller_audio, agent_audio, sr)
     print("Fase 2 (pesada):", heavy_result)
 
 

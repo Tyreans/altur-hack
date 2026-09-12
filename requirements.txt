@@ -4,4 +4,11 @@ numpy
 soundfile
 # Descomentar cuando Miguel/Marco integren el modelo real:
 # transformers
-# torch
+torch
+spafe
+praat-parselmouth
+librosa
+pandas
+scikit-learn
+joblib
+scipy

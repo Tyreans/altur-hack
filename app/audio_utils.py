@@ -13,13 +13,13 @@ import numpy as np
 import soundfile as sf
 
 
-def decode_audio_b64(audio_b64: str) -> tuple[np.ndarray, int]:
+def decode_audio_b64(audio_b64: str) -> tuple[np.ndarray, np.ndarray, int]:
     """
-    Decodifica un audio (wav/flac/ogg) codificado en base64 a un
-    arreglo mono float32 + su sample rate.
+    Decodifica un WAV estéreo codificado en base64.
 
-    Lanza ValueError si el payload no se puede decodificar, para que
-    main.py lo convierta en un 400 limpio hacia el juez.
+    Regresa (caller_audio, agent_audio, sample_rate):
+        - caller_audio: canal 0, la voz a clasificar
+        - agent_audio:  canal 1, el agente (contexto para comportamiento)
     """
     try:
         raw_bytes = base64.b64decode(audio_b64, validate=True)
@@ -31,7 +31,12 @@ def decode_audio_b64(audio_b64: str) -> tuple[np.ndarray, int]:
     except Exception as e:
         raise ValueError(f"No se pudo decodificar el audio: {e}")
 
-    if audio.ndim > 1:
-        audio = audio.mean(axis=1)  # baja a mono si viene estéreo
+    if audio.ndim != 2 or audio.shape[1] != 2:
+        raise ValueError(
+            f"Se esperaba WAV estéreo (canal 0 = caller, canal 1 = agente); "
+            f"llegó shape={audio.shape}"
+        )
 
-    return audio, sample_rate
+    caller_audio = np.ascontiguousarray(audio[:, 0])
+    agent_audio = np.ascontiguousarray(audio[:, 1])
+    return caller_audio, agent_audio, sample_rate

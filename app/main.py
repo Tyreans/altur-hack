@@ -20,12 +20,12 @@ async def startup_event():
 @app.post("/detect", response_model=DetectResponse)
 async def detect(payload: DetectRequest):
     try:
-        audio, sample_rate = decode_audio_b64(payload.audio_base64)
+        caller_audio, agent_audio, sample_rate = decode_audio_b64(payload.audio_base64)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     # Fase 1 (rápida) — en threadpool para no bloquear el event loop
-    fast_result = await run_in_threadpool(evaluate_fast, audio, sample_rate)
+    fast_result = await run_in_threadpool(evaluate_fast, caller_audio, sample_rate)
     conf = fast_result["confidence_synthetic"]
 
     if conf >= config.FAST_HIGH_THRESHOLD or conf <= config.FAST_LOW_THRESHOLD:
@@ -39,7 +39,7 @@ async def detect(payload: DetectRequest):
     # Fase 2 (pesada) — con timeout y fallback a la Fase 1 si falla
     try:
         heavy_result = await asyncio.wait_for(
-            run_in_threadpool(heavy_model.evaluate_heavy, audio, sample_rate),
+            run_in_threadpool(heavy_model.evaluate_heavy, caller_audio, agent_audio, sample_rate),
             timeout=config.HEAVY_MODEL_TIMEOUT,
         )
         return DetectResponse(
