@@ -13,5 +13,3 @@ class DetectRequest(BaseModel):
 class DetectResponse(BaseModel):
     is_synthetic: bool
     confidence: float
-    phase: str  # "fast" | "heavy" | "fast_fallback"
-    signals: dict = {}  # info de depuración/demo, opcional

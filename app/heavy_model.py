@@ -1,36 +1,16 @@
-"""
-Fase 2: modelo pesado (ahora usa el Random Forest entrenado).
-
-Responsables: Miguel / Marco
-
-CONTRATO (no rompan estas firmas, main.py depende de ellas):
-    load_model() -> None
-        Se llama UNA sola vez, cuando arranca el servidor (main.py lo
-        invoca en el evento de startup). Aquí se carga el modelo en
-        memoria/GPU para que cada request NO tenga que recargarlo.
-
-    evaluate_heavy(caller_audio: np.ndarray, agent_audio: np.ndarray, sample_rate: int) -> dict
-        {
-            "confidence_synthetic": float en [0, 1],
-        }
-
-Pueden desarrollar y probar esto SIN levantar FastAPI:
-    python test_local.py ruta/a/un_audio.wav
-"""
-
 import os
 import time
 import joblib
-import pandas as pd
 import numpy as np
 from pathlib import Path
+import warnings
 
 from .acoustic_features import extract_acoustic_features
 from .behavior_features import extract_behavior_features, get_vad_timestamps
 
 _model_data = None
 
-def load_model():
+def load_model() -> None:
     global _model_data
     model_path = Path(__file__).resolve().parent.parent / "model.joblib"
     
@@ -46,45 +26,72 @@ def evaluate_heavy(caller_audio: np.ndarray, agent_audio: np.ndarray, sample_rat
         raise RuntimeError("El modelo no se cargó. ¿Olvidaste llamar load_model()?")
 
     if _model_data == "placeholder":
-        return {"confidence_synthetic": 0.5}
+        return {"confidence_synthetic": 0.5, "timings": {}}
 
-    t_start = time.perf_counter()
+    t0_total = time.perf_counter()
+    timings = {}
     
-    # 1. Medir VAD
+    # 1. Medir VAD UNA SOLA VEZ para ambos canales
+    t0_vad = time.perf_counter()
     caller_turns = get_vad_timestamps(caller_audio, sample_rate)
-    agent_turns = get_vad_timestamps(agent_audio, sample_rate)
-    t_vad = time.perf_counter()
+    timings["vad_ms"] = (time.perf_counter() - t0_vad) * 1000
+
+    # 2. Medir Acústica pasándole los turnos precalculados del caller
+    t0_acustica = time.perf_counter()
+    acoustic_feats = extract_acoustic_features(caller_audio, sample_rate, caller_turns)
     
-    # 2. Medir Acústica (Aún sin recortar silencios, para ver el cuello de botella real)
-    acoustic_feats = extract_acoustic_features(caller_audio, sample_rate)
-    t_acoustic = time.perf_counter()
+    # Limpieza de métricas internas del diccionario de características acústicas
+    skipped_segs = acoustic_feats.pop("__skipped_short_segments", 0)
+    timings["lfcc_ms"] = acoustic_feats.pop("__t_lfcc", 0.0)
+    timings["parselmouth_ms"] = acoustic_feats.pop("__t_parselmouth", 0.0)
+    timings["librosa_ms"] = acoustic_feats.pop("__t_librosa", 0.0)
+    timings["acustica_ms"] = (time.perf_counter() - t0_acustica) * 1000
+    timings["skipped_short_segments"] = skipped_segs
     
-    # 3. Medir Conductual
-    behavior_feats = extract_behavior_features(caller_audio, agent_audio, sample_rate, precomputed_caller_turns=caller_turns, precomputed_agent_turns=agent_turns)
-    t_behavior = time.perf_counter()
+    # 3. Medir Conductual reciclando los turnos calculados en el paso 1
+    t0_behav = time.perf_counter()
+    behavior_feats = extract_behavior_features(
+        caller_audio, 
+        agent_audio, 
+        sample_rate, 
+        caller_turns=caller_turns,
+    )
+    timings["behavior_ms"] = (time.perf_counter() - t0_behav) * 1000
     
-    # 4. Imputación e Inferencia
+    # 4. Imputación e Inferencia SIN PANDAS (NumPy directo)
+    t0_infer = time.perf_counter()
     combined = {**acoustic_feats, **behavior_feats}
-    df_infer = pd.DataFrame([combined])
     
     medians = _model_data.get("medians", {})
     feature_cols = _model_data["feature_cols"]
     
-    for col, val in medians.items():
+    infer_dict = {}
+    for col, val_mediana in medians.items():
+        base_val = combined.get(col, np.nan)
+        
+        # Bandera de valor faltante
         if f"{col}_was_missing" in feature_cols:
-            df_infer[f"{col}_was_missing"] = 1.0 if pd.isna(df_infer.get(col, np.nan)[0]) else 0.0
-        if col in df_infer.columns and pd.isna(df_infer[col][0]):
-            df_infer[col] = val
+            infer_dict[f"{col}_was_missing"] = 1.0 if np.isnan(base_val) else 0.0
+        
+        # Imputación real
+        infer_dict[col] = val_mediana if np.isnan(base_val) else base_val
             
+    # Llenado de seguridad para columnas esperadas pero no generadas
     for col in feature_cols:
-        if col not in df_infer:
-            df_infer[col] = 0.0
+        if col not in infer_dict:
+            infer_dict[col] = 0.0
             
-    X_infer = df_infer[feature_cols]
-    clf = _model_data["model"]
-    confidence = float(clf.predict_proba(X_infer)[0, 1])
-    t_infer = time.perf_counter()
-
-    print(f"[evaluate_heavy] Tiempos -> VAD: {t_vad-t_start:.3f}s | Acústica: {t_acoustic-t_vad:.3f}s | Conductual: {t_behavior-t_acoustic:.3f}s | Infer: {t_infer-t_behavior:.3f}s")
+   # Convertir directo a numpy array 2D
+    X_infer = np.array([[infer_dict[col] for col in feature_cols]])
     
-    return {"confidence_synthetic": confidence}
+    clf = _model_data["model"]
+    
+    # Silenciamos la queja de Scikit-Learn sobre los feature names
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=UserWarning)
+        confidence = float(clf.predict_proba(X_infer)[0, 1])
+        
+    timings["inference_ms"] = (time.perf_counter() - t0_infer) * 1000
+    timings["total_ms"] = (time.perf_counter() - t0_total) * 1000
+    
+    return {"confidence_synthetic": confidence, "timings": timings}
