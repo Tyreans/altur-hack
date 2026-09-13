@@ -24,7 +24,6 @@ import joblib
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
 
 from .acoustic_features import extract_acoustic_features
 from .behavior_features import extract_behavior_features, get_vad_timestamps
@@ -33,7 +32,6 @@ _model_data = None
 
 def load_model():
     global _model_data
-    # Ruta absoluta robusta
     model_path = Path(__file__).resolve().parent.parent / "model.joblib"
     
     if model_path.exists():
@@ -50,50 +48,34 @@ def evaluate_heavy(caller_audio: np.ndarray, agent_audio: np.ndarray, sample_rat
     if _model_data == "placeholder":
         return {"confidence_synthetic": 0.5}
 
-    timings = {}
+    t_start = time.perf_counter()
     
-    # 1. Extraer VAD de Caller UNA vez
-    start = time.perf_counter()
+    # 1. Medir VAD
     caller_turns = get_vad_timestamps(caller_audio, sample_rate)
     agent_turns = get_vad_timestamps(agent_audio, sample_rate)
+    t_vad = time.perf_counter()
     
-    # Recortar silencios para la fase acústica (Acelera Librosa enormemente)
-    trimmed_caller = []
-    for t in caller_turns:
-        start_idx = int(t["start"] * sample_rate)
-        end_idx = int(t["end"] * sample_rate)
-        trimmed_caller.append(caller_audio[start_idx:end_idx])
-    caller_audio_trimmed = np.concatenate(trimmed_caller) if trimmed_caller else caller_audio
+    # 2. Medir Acústica (Aún sin recortar silencios, para ver el cuello de botella real)
+    acoustic_feats = extract_acoustic_features(caller_audio, sample_rate)
+    t_acoustic = time.perf_counter()
     
-    timings["VAD"] = time.perf_counter() - start
-
-    # 2. Paralelizar extracción de features
-    start = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        f_acoustic = executor.submit(extract_acoustic_features, caller_audio_trimmed, sample_rate)
-        f_behavior = executor.submit(extract_behavior_features, caller_audio, agent_audio, sample_rate, caller_turns, agent_turns)
-        
-        acoustic_feats = f_acoustic.result()
-        behavior_feats = f_behavior.result()
-        
-    timings["Features"] = time.perf_counter() - start
-
-    # 3. Imputación e Inferencia
-    start = time.perf_counter()
+    # 3. Medir Conductual
+    behavior_feats = extract_behavior_features(caller_audio, agent_audio, sample_rate, precomputed_caller_turns=caller_turns, precomputed_agent_turns=agent_turns)
+    t_behavior = time.perf_counter()
+    
+    # 4. Imputación e Inferencia
     combined = {**acoustic_feats, **behavior_feats}
     df_infer = pd.DataFrame([combined])
     
     medians = _model_data.get("medians", {})
     feature_cols = _model_data["feature_cols"]
     
-    # Aplicar lógica idéntica de NaN e imputación de train_classifier.py
     for col, val in medians.items():
         if f"{col}_was_missing" in feature_cols:
             df_infer[f"{col}_was_missing"] = 1.0 if pd.isna(df_infer.get(col, np.nan)[0]) else 0.0
         if col in df_infer.columns and pd.isna(df_infer[col][0]):
             df_infer[col] = val
             
-    # Garantizar columnas y orden
     for col in feature_cols:
         if col not in df_infer:
             df_infer[col] = 0.0
@@ -101,7 +83,8 @@ def evaluate_heavy(caller_audio: np.ndarray, agent_audio: np.ndarray, sample_rat
     X_infer = df_infer[feature_cols]
     clf = _model_data["model"]
     confidence = float(clf.predict_proba(X_infer)[0, 1])
-    timings["Infer"] = time.perf_counter() - start
+    t_infer = time.perf_counter()
 
-    print(f"[evaluate_heavy] Latencia -> VAD: {timings['VAD']:.3f}s | Features: {timings['Features']:.3f}s | Infer: {timings['Infer']:.3f}s")
+    print(f"[evaluate_heavy] Tiempos -> VAD: {t_vad-t_start:.3f}s | Acústica: {t_acoustic-t_vad:.3f}s | Conductual: {t_behavior-t_acoustic:.3f}s | Infer: {t_infer-t_behavior:.3f}s")
+    
     return {"confidence_synthetic": confidence}

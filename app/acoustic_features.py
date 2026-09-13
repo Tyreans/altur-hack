@@ -8,6 +8,7 @@ from parselmouth.praat import call
 from spafe.features.lfcc import lfcc
 import librosa
 import warnings
+import time
 
 def _get_default_features() -> dict[str, float]:
     features = {}
@@ -26,12 +27,14 @@ def _get_default_features() -> dict[str, float]:
     features["zcr_std"] = 0.0
     return features
 
+
+
 def extract_acoustic_features(caller_audio: np.ndarray, sample_rate: int) -> dict[str, float]:
     features = _get_default_features()
 
     if len(caller_audio) < sample_rate * 0.1 or np.all(caller_audio == 0):
         return features
-
+    t0 = time.perf_counter()
     # 1. LFCC con spafe
     try:
         with warnings.catch_warnings():
@@ -45,6 +48,7 @@ def extract_acoustic_features(caller_audio: np.ndarray, sample_rate: int) -> dic
             features[f"delta_lfcc_{i}_std"] = float(np.std(delta_lfccs[:, i]))
     except Exception:
         pass # Usa defaults
+    t1 = time.perf_counter()
 
     # 2. Jitter y Shimmer usando parselmouth
     try:
@@ -58,6 +62,7 @@ def extract_acoustic_features(caller_audio: np.ndarray, sample_rate: int) -> dic
     except Exception:
         features["jitter_local"] = np.nan
         features["shimmer_local"] = np.nan
+    t2 = time.perf_counter()
 
     # 3. Spectral Features (librosa)
     try:
@@ -74,5 +79,9 @@ def extract_acoustic_features(caller_audio: np.ndarray, sample_rate: int) -> dic
         features["zcr_std"] = float(np.std(zcr))
     except Exception:
         pass
+    t3 = time.perf_counter()
+
+    print(f"  └─ [Acústica] LFCC: {t1-t0:.3f}s | Parselmouth: {t2-t1:.3f}s | Librosa: {t3-t2:.3f}s")
+    
 
     return features
