@@ -1,5 +1,4 @@
 import asyncio
-
 from fastapi import FastAPI, HTTPException
 from starlette.concurrency import run_in_threadpool
 
@@ -10,12 +9,9 @@ from .schemas import DetectRequest, DetectResponse
 
 app = FastAPI(title="Detector de Audio IA")
 
-
 @app.on_event("startup")
 async def startup_event():
-    # Carga el modelo pesado UNA sola vez al arrancar, no por request.
     await run_in_threadpool(heavy_model.load_model)
-
 
 @app.post("/detect", response_model=DetectResponse)
 async def detect(payload: DetectRequest):
@@ -24,7 +20,6 @@ async def detect(payload: DetectRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Fase 1 (rápida) — en threadpool para no bloquear el event loop
     fast_result = await run_in_threadpool(evaluate_fast, caller_audio, sample_rate)
     conf = fast_result["confidence_synthetic"]
 
@@ -36,7 +31,6 @@ async def detect(payload: DetectRequest):
             signals=fast_result["signals"],
         )
 
-    # Fase 2 (pesada) — con timeout y fallback a la Fase 1 si falla
     try:
         heavy_result = await asyncio.wait_for(
             run_in_threadpool(heavy_model.evaluate_heavy, caller_audio, agent_audio, sample_rate),
@@ -48,16 +42,15 @@ async def detect(payload: DetectRequest):
             phase="heavy",
             signals=fast_result["signals"],
         )
-    except asyncio.TimeoutError:
-        # No dejamos al juez sin respuesta: caemos de vuelta al veredicto
-        # de la Fase 1 aunque fuera dudoso.
+    except Exception as e:
+        # Se captura Exception general para que fallos acústicos/ONNX también regresen veredicto
+        print(f"[main.py] Fallo en evaluate_heavy (Fallback a Fase 1): {e}")
         return DetectResponse(
             is_synthetic=conf >= 0.5,
             confidence=conf,
             phase="fast_fallback",
             signals=fast_result["signals"],
         )
-
 
 @app.get("/health")
 async def health():

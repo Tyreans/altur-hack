@@ -5,7 +5,7 @@ FAST_HIGH_THRESHOLD = 0.95  # >= esto -> "sintético", responde ya
 FAST_LOW_THRESHOLD = 0.05   # <= esto -> "humano", responde ya
 
 # Timeout máximo (segundos) para esperar al modelo pesado (Fase 2).
-HEAVY_MODEL_TIMEOUT = 8.0
+HEAVY_MODEL_TIMEOUT = 30.0
 
 # Nota para Paola: si tienen tiempo de correr el dataset .json contra
 # fast_checks.py, estos umbrales son lo primero que hay que recalibrar

@@ -18,32 +18,38 @@ Pueden desarrollar y probar esta función SIN levantar FastAPI:
 
 import numpy as np
 
-
 def evaluate_fast(audio: np.ndarray, sample_rate: int) -> dict:
     signals = {}
+    
+    if len(audio) == 0:
+        return {"confidence_synthetic": 0.5, "signals": {"error": "audio vacio"}}
 
-    # --- Ejemplo 1: naturalidad del "piso de ruido" ---
-    # El ruido de fondo real casi nunca es perfectamente plano; el audio
-    # sintético a veces tiene silencios sospechosamente limpios.
-    quiet_mask = np.abs(audio) < np.percentile(np.abs(audio), 10)
-    noise_floor = np.abs(audio[quiet_mask])
-    signals["noise_floor_std"] = float(np.std(noise_floor)) if len(noise_floor) else 0.0
+    # Heurística 1: Tasa de cruces por cero (ZCR) rápida (Proxy para textura metálica)
+    # Las voces sintéticas a baja calidad suelen tener anomalías en los picos de ZCR.
+    zcr = np.abs(np.diff(np.signbit(audio))).sum() / len(audio)
+    signals["zcr_estimado"] = float(zcr)
 
-    # --- Ejemplo 2: variabilidad de energía entre frames (proxy de
-    # naturalidad de pausas / prosodia) ---
+    # Heurística 2: Dinámica de Energía RMS
     frame_len = max(int(sample_rate * 0.02), 1)
     frames = [audio[i:i + frame_len] for i in range(0, len(audio), frame_len)]
     energies = np.array([np.sqrt(np.mean(f ** 2)) for f in frames if len(f) > 0])
-    signals["energy_variability"] = float(np.std(energies)) if len(energies) else 0.0
+    
+    energy_var = float(np.std(energies)) if len(energies) > 0 else 0.0
+    signals["energy_variability"] = energy_var
 
-    # TODO Miguel/Marco: esta combinación es un placeholder ingenuo, solo
-    # para que el pipeline corra de punta a punta HOY. Reemplácenla por
-    # algo calibrado contra el dataset real en cuanto puedan.
-    score = 0.5
-    if signals["noise_floor_std"] < 0.001:
-        score += 0.3
-    if signals["energy_variability"] < 0.01:
-        score += 0.2
-    score = min(max(score, 0.0), 1.0)
+    # Calibración rápida en base a ZCR y Energía
+    # Voces muy monótonas (variabilidad baja) y ZCR excesivamente alto apuntan a vocoders IA.
+    confidence = 0.5
+    
+    if energy_var < 0.005:
+        confidence += 0.25  # Sospechoso: poco rango dinámico
+    elif energy_var > 0.05:
+        confidence -= 0.15  # Humano: rango dinámico rico
+        
+    if zcr > 0.15:
+        confidence += 0.20  # Sospechoso: mucha fricción en frecuencias agudas
+    
+    # Limitar entre 0 y 1
+    confidence = min(max(confidence, 0.0), 1.0)
 
-    return {"confidence_synthetic": score, "signals": signals}
+    return {"confidence_synthetic": confidence, "signals": signals}
